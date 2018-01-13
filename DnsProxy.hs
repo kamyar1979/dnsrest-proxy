@@ -107,9 +107,10 @@ resolveUsingHttp req = do
     case J.decode (res ^. responseBody) of
         Nothing -> return $ Left ("Unable to resolve domain:  " ++ (B.unpack $ qname quest))
         Just resLst -> case qtype $ quest of
-            A -> return $ Right $ responseA ident quest (map (read.value) resLst)
-            NS -> return $ Right $ responseNS ident quest (map (B.pack.value) resLst)
-            MX -> return $ Right $ responseMX ident quest (map (readMxItem.value) resLst)
+            A -> return $ Right $ responseA ident quest $ (read.value) <$> resLst
+            NS -> return $ Right $ responseNS ident quest $ (B.pack.value) <$> resLst
+            MX -> return $ Right $ responseMX ident quest $ (readMxItem.value) <$> resLst
+            AAAA -> return $ Right $ responseAAAA ident quest $ (read.value) <$> resLst
     where 
         ident = identifier . header $ req
         quest = (question req)!!0
