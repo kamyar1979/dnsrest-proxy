@@ -21,6 +21,9 @@ import Network.Wreq hiding (header)
 import Control.Lens
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as J
+import Data.Tuple
+import GHC.Word
+import Data.List
 
 type Host = (Domain, IPv4)
 
@@ -73,16 +76,46 @@ run conf = withSocketsDo $ do
         (s, addr) <- recvFrom sock (bufSize conf)
         forkIO $ handlePacket conf sock addr s
 
+responseNS :: Identifier -> Question -> [Domain] -> DNSMessage
+responseNS ident q domains =
+  let hd = header defaultResponse
+      dom = qname q
+      an = ResourceRecord dom NS classIN 300 . RD_NS <$> domains
+  in  defaultResponse {
+          header = hd { identifier=ident }
+        , question = [q]
+        , answer = an
+      }
+
+responseMX :: Identifier -> Question -> [(Word16, Domain)] -> DNSMessage
+responseMX ident q dps =
+  let hd = header defaultResponse
+      dom = qname q
+      an = ResourceRecord dom MX classIN 300 . uncurry RD_MX <$> dps
+  in  defaultResponse {
+          header = hd { identifier=ident }
+        , question = [q]
+        , answer = an
+      }
+      
+readMxItem :: String -> (Word16, Domain)
+readMxItem val = (read $ takeWhile (/= ' ') val, B.pack $ dropWhile (== ' ') $ dropWhile (/= ' ') val)
 
 resolveUsingHttp :: DNSMessage -> IO (Either String DNSMessage)
 resolveUsingHttp req = do
-    res <- get ("https://dns-api.org/" ++ (show $ qtype $ (question req)!!0) ++ "/" ++ (B.unpack $ qname $ (question req)!!0))
-    case J.decode (res ^. responseBody) :: Maybe [HttpDnsResponse] of
-        Nothing -> return $ Left ("Unable to resolve domain:  " ++ (B.unpack $ qname q))
-        Just resLst -> return $ Right $ responseA ident q (map (read.value) resLst)
-        where 
-            ident = identifier . header $ req
-            q = (question req)!!0
+    res <- get ("https://dns-api.org/" ++ (show $ qtype $ quest) ++ "/" ++ (B.unpack $ qname $ quest))
+    case J.decode (res ^. responseBody) of
+        Nothing -> return $ Left ("Unable to resolve domain:  " ++ (B.unpack $ qname quest))
+        Just resLst -> case qtype $ quest of
+            A -> return $ Right $ responseA ident quest (map (read.value) resLst)
+            NS -> return $ Right $ responseNS ident quest (map (B.pack.value) resLst)
+            MX -> return $ Right $ responseMX ident quest (map (readMxItem.value) resLst)
+    where 
+        ident = identifier . header $ req
+        quest = (question req)!!0
+        
+    
+        
     
 
 main :: IO ()
