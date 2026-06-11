@@ -1,60 +1,31 @@
-{-# LANGUAGE RecordWildCards, OverloadedStrings, DeriveGeneric #-}
+{-# LANGUAGE RecordWildCards, OverloadedStrings #-}
 
-import Prelude hiding (takeWhile)
-import Control.Applicative ( (<$>), (<*>) )
+import Control.Exception (SomeException, try)
 import Control.Concurrent (forkIO)
 import Control.Monad (forever)
-import Data.Default (Default(def))
-import Data.IP (IPv4, toIPv4)
-import Data.List (partition)
 import Data.Maybe
 import System.Environment (getArgs)
+import System.Exit (die)
 import System.Timeout (timeout)
-import Network.Socket.ByteString (sendAll, sendAllTo, recvFrom)
+import Network.Socket.ByteString (sendAllTo, recvFrom)
 import Network.Socket hiding (recvFrom)
 import Network.DNS
-import Network.DNS.Resolver (Resolver)
-import GHC.Generics
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
-import Network.Wreq hiding (header)
-import Control.Lens
-import Data.Aeson (FromJSON, ToJSON)
-import qualified Data.Aeson as J
-import Data.Tuple
-import GHC.Word
-import Data.List
+import qualified Network.HTTP.Client as HTTP
+import qualified Network.HTTP.Client.TLS as HTTPS
+import DnsProxyCore
 
-type Host = (Domain, IPv4)
-
-data HttpDnsResponse  = HttpDnsResponse { name::String, value::String, ttl::Int} deriving (Show, Generic)
-
-instance FromJSON HttpDnsResponse
-
-
-data Conf = Conf
-  { bufSize     :: Int
-  , timeOut     :: Int
-  }
-
-instance Default Conf where
-    def = Conf
-      { bufSize     = 512
-      , timeOut     = 10 * 1000 * 1000
-      }
-
-toEither :: a -> Maybe b -> Either a b
-toEither a = maybe (Left a) Right
 
 {--
  - Parse request and compose response.
  -}
-handlePacket :: Conf -> Socket -> SockAddr -> B.ByteString -> IO ()
-handlePacket conf@Conf{..} sock addr s =
+handlePacket :: Conf -> HTTP.Manager -> Socket -> SockAddr -> B.ByteString -> IO ()
+handlePacket conf@Conf{..} manager sock addr s =
     either
-    (putStrLn . ("decode fail:"++))
+    (putStrLn . ("decode fail:"++) . show)
     (\req -> do
-        resolveUsingHttp req >>=
+        resolveUsingDoh conf manager req >>=
             either
             putStrLn
             (\rsp -> let packet = encode rsp
@@ -66,6 +37,7 @@ handlePacket conf@Conf{..} sock addr s =
 
 run :: Conf -> IO ()
 run conf = withSocketsDo $ do
+    manager <- HTTP.newManager HTTPS.tlsManagerSettings
     addrinfos <- getAddrInfo
                    (Just (defaultHints {addrFlags = [AI_PASSIVE]}))
                    Nothing (Just "domain")
@@ -74,50 +46,30 @@ run conf = withSocketsDo $ do
     bind sock (addrAddress addrinfo)
     forever $ do
         (s, addr) <- recvFrom sock (bufSize conf)
-        forkIO $ handlePacket conf sock addr s
+        forkIO $ handlePacket conf manager sock addr s
 
-responseNS :: Identifier -> Question -> [Domain] -> DNSMessage
-responseNS ident q domains =
-  let hd = header defaultResponse
-      dom = qname q
-      an = ResourceRecord dom NS classIN 300 . RD_NS <$> domains
-  in  defaultResponse {
-          header = hd { identifier=ident }
-        , question = [q]
-        , answer = an
+resolveUsingDoh :: Conf -> HTTP.Manager -> DNSMessage -> IO (Either String DNSMessage)
+resolveUsingDoh Conf{..} manager req = do
+    httpReq <- makeDohRequest dohUrl req
+    res <- try (HTTP.httpLbs httpReq manager) :: IO (Either SomeException (HTTP.Response BL.ByteString))
+    case res of
+        Left err -> return $ Left ("DoH request failed: " ++ show err)
+        Right rsp -> return $ either (Left . ("DoH response decode failed: "++) . show) (Right . restoreResponseId req)
+                   $ decode (BL.toStrict $ HTTP.responseBody rsp)
+
+makeDohRequest :: String -> DNSMessage -> IO HTTP.Request
+makeDohRequest url req = do
+    httpReq <- HTTP.parseRequest url
+    return httpReq
+      { HTTP.method = "POST"
+      , HTTP.requestBody = HTTP.RequestBodyLBS . BL.fromStrict . encode $ prepareDohRequest req
+      , HTTP.requestHeaders =
+          [ ("Accept", "application/dns-message")
+          , ("Content-Type", "application/dns-message")
+          ]
       }
-
-responseMX :: Identifier -> Question -> [(Word16, Domain)] -> DNSMessage
-responseMX ident q dps =
-  let hd = header defaultResponse
-      dom = qname q
-      an = ResourceRecord dom MX classIN 300 . uncurry RD_MX <$> dps
-  in  defaultResponse {
-          header = hd { identifier=ident }
-        , question = [q]
-        , answer = an
-      }
-      
-readMxItem :: String -> (Word16, Domain)
-readMxItem val = (read $ takeWhile (/= ' ') val, B.pack $ dropWhile (== ' ') $ dropWhile (/= ' ') val)
-
-resolveUsingHttp :: DNSMessage -> IO (Either String DNSMessage)
-resolveUsingHttp req = do
-    res <- get ("https://dns-api.org/" ++ (show $ qtype $ quest) ++ "/" ++ (B.unpack $ qname $ quest))
-    case J.decode (res ^. responseBody) of
-        Nothing -> return $ Left ("Unable to resolve domain:  " ++ (B.unpack $ qname quest))
-        Just resLst -> case qtype $ quest of
-            A -> return $ Right $ responseA ident quest $ (read.value) <$> resLst
-            NS -> return $ Right $ responseNS ident quest $ (B.pack.value) <$> resLst
-            MX -> return $ Right $ responseMX ident quest $ (readMxItem.value) <$> resLst
-            AAAA -> return $ Right $ responseAAAA ident quest $ (read.value) <$> resLst
-    where 
-        ident = identifier . header $ req
-        quest = (question req)!!0
-        
-    
-        
-    
 
 main :: IO ()
-main = run def
+main = do
+    args <- getArgs
+    either die run $ configFromArgs args
