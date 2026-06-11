@@ -20,7 +20,7 @@ Some networks force all UDP/53 traffic through their own resolvers. That can bre
 ## Build
 
 ```sh
-cabal-3.14.2.0 build DnsProxy
+cabal build DnsProxy
 ```
 
 ## Run
@@ -28,13 +28,13 @@ cabal-3.14.2.0 build DnsProxy
 Use the default Cloudflare endpoint:
 
 ```sh
-cabal-3.14.2.0 run DnsProxy
+cabal run DnsProxy
 ```
 
 Use a custom DoH endpoint:
 
 ```sh
-cabal-3.14.2.0 run DnsProxy -- https://dns.google/dns-query
+cabal run DnsProxy -- https://dns.google/dns-query
 ```
 
 If you run the built executable directly:
@@ -46,7 +46,7 @@ If you run the built executable directly:
 ## Test
 
 ```sh
-cabal-3.14.2.0 test
+cabal test
 ```
 
 The tests cover command-line config parsing and the DNS message ID normalization/restoration used around DoH requests.
